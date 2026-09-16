@@ -25,6 +25,15 @@ class BenchmarkPlanTests(unittest.TestCase):
         self.assertEqual({case.update_length for case in specs}, {1, 2, 8, 16})
         self.assertEqual({case.request_index_dtype for case in specs}, {"int32", "int64"})
 
+    def test_stage_two_matrix_is_core_relative_and_excludes_c_plus_or_minus_one(self) -> None:
+        specs = benchmark.stage2_case_specs(7, 32)
+        self.assertEqual({case.batch_size for case in specs}, {16, 32, 64})
+        self.assertEqual({case.update_length for case in specs}, {1, 16})
+        self.assertEqual({case.request_index_dtype for case in specs}, {"int64"})
+        self.assertEqual({case.stage for case in specs}, {benchmark.STAGE2})
+        self.assertNotIn(31, {case.batch_size for case in specs})
+        self.assertNotIn(33, {case.batch_size for case in specs})
+
     def test_guarded_storage_covers_static_alignment_reads(self) -> None:
         for dtype in ("int32", "int64"):
             for batch in (8, 32, 128):
@@ -97,6 +106,7 @@ class BenchmarkPlanTests(unittest.TestCase):
                         "sustained_calls": 200,
                         "assign_active_cores": None,
                         "dry_run": True,
+                        "stage": benchmark.STAGE01,
                     },
                 )()
             )
@@ -105,6 +115,34 @@ class BenchmarkPlanTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "dry-run-static-validation")
             self.assertFalse((output / "results.jsonl").read_text())
             self.assertIn("timing_mode", (output / "results.csv").read_text().splitlines()[0])
+
+    def test_stage_two_dry_run_requires_and_records_core_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "result"
+            code = benchmark.run(
+                type(
+                    "Arguments",
+                    (),
+                    {
+                        "output_dir": output,
+                        "seed": 1,
+                        "warmup": 20,
+                        "isolated_samples": 200,
+                        "sustained_blocks": 5,
+                        "sustained_calls": 200,
+                        "assign_active_cores": 32,
+                        "dry_run": True,
+                        "stage": benchmark.STAGE2,
+                    },
+                )()
+            )
+            self.assertEqual(code, 0)
+            manifest = json.loads((output / "run-manifest.json").read_text())
+            self.assertEqual(manifest["benchmark_parameters"]["experiment_stage"], benchmark.STAGE2)
+            self.assertEqual(
+                {case["core_transition_relation"] for case in manifest["case_definitions"]},
+                {"below_active_cores", "equal_active_cores", "above_active_cores"},
+            )
 
 
 if __name__ == "__main__":

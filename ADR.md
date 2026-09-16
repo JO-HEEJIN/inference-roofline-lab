@@ -69,6 +69,17 @@
 - 결과 기록: JSONL, CSV, raw sample JSON, run manifest에 source commit/dirty status, loaded library hash, runtime/device/CANN metadata, fixture layout과 measurement parameters를 기록한다. correctness failure는 raw diagnostic과 함께 기록하고 같은 int64 case의 timing을 생략한다.
 - 검증: Python compile, 표준 라이브러리 unittest 6개, Stage 0/1 dry run, 그리고 no-NPU fail-closed path를 실행했다. 현재 Mac에는 `torch_npu`와 Ascend device가 없으므로 real correctness/latency 결과는 생성하지 않았다.
 
+## ADR-007 — Stage 2는 실제 core 수 기준의 coarse transition만 허용
+
+- 날짜: 2026-09-16
+- 상태: 구현 완료; Ascend 실행 대기
+- 배경: Stage 0/1 구현 뒤 다음 계획 단계를 진행한다. 계획서의 순서는 용량 sweep이 아니라 core-transition/prefix-work 관찰이며, 이후 Stage 4가 capacity 128/2048/16384과 alignment/reuse를 다룬다.
+- 결정: harness에 opt-in `--stage stage2`를 추가한다. 실제 assign blockDim/vector-core 수 `C`를 device properties에서 조회하거나 `--assign-active-cores`로 명시하고, int64 indices·capacity 2048·aligned start·update length 1/16에 대해 `B = floor(C/2), C, 2C`만 만든다. 각 case는 기존 guarded fresh fixture correctness gate를 통과해야 timing을 기록한다. 결과와 manifest에는 `below/equal/above active cores` 관계를 남긴다.
+- 대안: 지금 바로 `C-1/C+1` 또는 sequence capacity 128/16384을 포함한다.
+- 이유: `C±1`은 source의 metadata/scratch access와 runtime allocation을 별도로 검증해야 하는 case이며, capacity sweep은 core-count 및 prefix scalar work와 다른 가설을 시험한다. 한 번에 추가하면 latency 변화의 원인을 구분할 수 없다.
+- 검증: Stage 2 matrix는 `C=32` dry run에서 batch 16/32/64와 길이 1/16으로 생성되고 C±1을 포함하지 않는 단위 테스트를 추가한다. 실제 device의 `C`, correctness, latency, profiler per-core data는 Ascend 하드웨어에서만 기록한다.
+- 결과: Mac에서 static validation만 가능하다. `torch_npu`가 없으므로 performance 또는 core-transition 결과는 생성하지 않았다.
+
 ## 기록 형식
 
 각 후속 ADR에는 날짜·상태, 관찰 또는 질문, 결정, 대안과 이유, 검증 방법, 실제 결과와 남은 제약을 적는다. 성능 가설에는 반증 조건을 포함한다. 추측을 측정 결과로 기록하지 않는다.

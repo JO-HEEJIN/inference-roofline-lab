@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controlled Stage 0/1 baseline harness for ``cache_location_assign``.
+"""Controlled baseline and core-transition harness for ``cache_location_assign``.
 
 This file deliberately measures the unchanged upstream operator only.  It does
 not implement a replacement kernel, cache tiling, or an optimization variant.
@@ -35,11 +35,16 @@ from typing import Any, Iterable, Sequence
 
 MAX_STEP = 16
 LOGICAL_SEQUENCE_CAPACITY = 2048
+STAGE01 = "stage01"
+STAGE2 = "stage2"
 DEFAULT_BATCH_SIZES = (8, 32, 128)
 DEFAULT_UPDATE_LENGTHS = (1, 2, 8, 16)
+STAGE2_UPDATE_LENGTHS = (1, 16)
 OUTPUT_FIELDS = (
     "run_id",
     "record_type",
+    "experiment_stage",
+    "core_transition_relation",
     "operation",
     "batch_size",
     "sequence_capacity",
@@ -84,16 +89,22 @@ class CaseSpec:
     request_index_dtype: str
     seed: int
     guard_width: int = MAX_STEP
+    stage: str = STAGE01
 
     def validate(self) -> None:
         if self.operation != "assign":
-            raise ValueError("Stage 0/1 permits only operation='assign'")
-        if self.batch_size not in DEFAULT_BATCH_SIZES:
-            raise ValueError(f"Stage 1 batch must be one of {DEFAULT_BATCH_SIZES}")
+            raise ValueError("the controlled harness permits only operation='assign'")
+        if self.stage not in (STAGE01, STAGE2):
+            raise ValueError(f"unknown experiment stage: {self.stage}")
+        if self.batch_size <= 0:
+            raise ValueError("batch size must be positive")
+        if self.stage == STAGE01 and self.batch_size not in DEFAULT_BATCH_SIZES:
+            raise ValueError(f"Stage 0/1 batch must be one of {DEFAULT_BATCH_SIZES}")
         if self.sequence_capacity != LOGICAL_SEQUENCE_CAPACITY:
             raise ValueError("Stage 1 permits only sequence capacity 2048")
-        if self.update_length not in DEFAULT_UPDATE_LENGTHS:
-            raise ValueError(f"update length must be one of {DEFAULT_UPDATE_LENGTHS}")
+        allowed_updates = DEFAULT_UPDATE_LENGTHS if self.stage == STAGE01 else STAGE2_UPDATE_LENGTHS
+        if self.update_length not in allowed_updates:
+            raise ValueError(f"{self.stage} update length must be one of {allowed_updates}")
         if self.request_index_dtype not in ("int32", "int64"):
             raise ValueError("request-index dtype must be int32 or int64")
         if self.guard_width < MAX_STEP:
@@ -117,7 +128,7 @@ class CaseSpec:
     @property
     def case_id(self) -> str:
         return (
-            f"assign-b{self.batch_size}-s{self.sequence_capacity}"
+            f"assign-{self.stage}-b{self.batch_size}-s{self.sequence_capacity}"
             f"-u{self.update_length}-{self.request_index_dtype}-seed{self.seed}"
         )
 
@@ -346,6 +357,8 @@ class NpuContext:
         }
         self.metadata["device"] = self._device_metadata()
         self.active_assign_cores = active_core_override or self._discover_active_cores()
+        if active_core_override is not None:
+            self.metadata["assign_active_cores_source"] = "command_line.--assign-active-cores"
         if self.active_assign_cores is None:
             raise NpuUnavailable(
                 "could not discover Ascend vector-core count; pass --assign-active-cores "
@@ -588,9 +601,12 @@ def base_record(
     warmup: int,
     correctness_status: str,
     failure_reason: str | None,
+    active_assign_cores: int | None = None,
 ) -> dict[str, Any]:
     return {
         "record_type": "measurement",
+        "experiment_stage": spec.stage,
+        "core_transition_relation": core_transition_relation(spec, active_assign_cores),
         "operation": spec.operation,
         "batch_size": spec.batch_size,
         "sequence_capacity": spec.sequence_capacity,
@@ -623,11 +639,66 @@ def base_record(
 
 
 def case_specs(seed: int, dtypes: Iterable[str]) -> list[CaseSpec]:
+    """Return the fixed Stage 0/1 matrix (kept as the public baseline helper)."""
     return [
-        CaseSpec("assign", batch, LOGICAL_SEQUENCE_CAPACITY, update, dtype, seed)
+        CaseSpec("assign", batch, LOGICAL_SEQUENCE_CAPACITY, update, dtype, seed, stage=STAGE01)
         for dtype in dtypes
         for batch in DEFAULT_BATCH_SIZES
         for update in DEFAULT_UPDATE_LENGTHS
+    ]
+
+
+def stage2_batch_sizes(active_assign_cores: int) -> tuple[int, ...]:
+    """Choose below/at/above-core batch points without probing C±1 yet.
+
+    Stage 2 is intentionally coarse.  The plan reserves C±1 for a later
+    metadata/scratch-access investigation, so this emits only multiples or
+    fractions of the discovered host blockDim.
+    """
+    if active_assign_cores < 2:
+        raise ValueError("Stage 2 needs at least two active assign cores")
+    return tuple(sorted({max(1, active_assign_cores // 2), active_assign_cores, 2 * active_assign_cores}))
+
+
+def stage2_case_specs(seed: int, active_assign_cores: int) -> list[CaseSpec]:
+    return [
+        CaseSpec("assign", batch, LOGICAL_SEQUENCE_CAPACITY, update, "int64", seed, stage=STAGE2)
+        for batch in stage2_batch_sizes(active_assign_cores)
+        for update in STAGE2_UPDATE_LENGTHS
+    ]
+
+
+def selected_case_specs(stage: str, seed: int, active_assign_cores: int | None = None) -> list[CaseSpec]:
+    if stage == STAGE01:
+        return case_specs(seed, ("int32", "int64"))
+    if stage == STAGE2:
+        if active_assign_cores is None:
+            raise ValueError("Stage 2 needs the discovered core count or --assign-active-cores")
+        return stage2_case_specs(seed, active_assign_cores)
+    raise ValueError(f"unknown stage: {stage}")
+
+
+def core_transition_relation(spec: CaseSpec, active_assign_cores: int | None) -> str | None:
+    if spec.stage != STAGE2 or active_assign_cores is None:
+        return None
+    if spec.batch_size < active_assign_cores:
+        return "below_active_cores"
+    if spec.batch_size == active_assign_cores:
+        return "equal_active_cores"
+    return "above_active_cores"
+
+
+def manifest_case_definitions(
+    specs: Iterable[CaseSpec], active_assign_cores: int | None
+) -> list[dict[str, Any]]:
+    return [
+        asdict(spec)
+        | {
+            "case_id": spec.case_id,
+            "core_transition_relation": core_transition_relation(spec, active_assign_cores),
+            "storage": asdict(storage_plan(spec)),
+        }
+        for spec in specs
     ]
 
 
@@ -644,6 +715,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sustained-blocks", type=int, default=5)
     parser.add_argument("--sustained-calls", type=int, default=200)
     parser.add_argument(
+        "--stage",
+        choices=(STAGE01, STAGE2),
+        default=STAGE01,
+        help="stage01: fixed baseline; stage2: C/2, C, and 2C core-transition cases",
+    )
+    parser.add_argument(
         "--assign-active-cores",
         type=int,
         help="actual blockDim for assign when torch.npu device properties do not expose vector-core count",
@@ -651,7 +728,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="validate the Stage 0/1 matrix and write a manifest without importing or executing NPU code",
+        help="validate the selected matrix and write a manifest without importing or executing NPU code",
     )
     return parser.parse_args()
 
@@ -665,10 +742,13 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("sustained block and call counts must be positive")
     if args.assign_active_cores is not None and args.assign_active_cores <= 0:
         raise ValueError("--assign-active-cores must be positive")
+    if args.dry_run and getattr(args, "stage", STAGE01) == STAGE2 and args.assign_active_cores is None:
+        raise ValueError("Stage 2 dry run requires --assign-active-cores to construct the C-relative matrix")
 
 
 def run(args: argparse.Namespace) -> int:
     validate_args(args)
+    stage = getattr(args, "stage", STAGE01)
     workspace = Path(__file__).resolve().parents[2]
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise ValueError("--output-dir must be new or empty so artifacts cannot be mixed across runs")
@@ -677,19 +757,26 @@ def run(args: argparse.Namespace) -> int:
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
     writer = ResultWriter(args.output_dir, run_id)
     manifest_path = args.output_dir / "run-manifest.json"
-    all_specs = case_specs(args.seed, ("int32", "int64"))
+    static_cores = args.assign_active_cores if stage == STAGE2 else None
+    all_specs = selected_case_specs(stage, args.seed, static_cores) if (stage == STAGE01 or static_cores) else []
+    scope = (
+        "Stage 0 correctness plus Stage 1 int64 assign baseline only"
+        if stage == STAGE01
+        else "Stage 2 int64 assign core-transition baseline: C/2, C, and 2C; lengths 1 and 16"
+    )
     manifest: dict[str, Any] = {
         "schema_version": 1,
         "run_id": run_id,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "status": "initializing",
-        "scope": "Stage 0 correctness plus Stage 1 int64 assign baseline only",
+        "scope": scope,
         "benchmark_parameters": {
             "operation": "assign",
-            "batch_sizes": list(DEFAULT_BATCH_SIZES),
+            "experiment_stage": stage,
+            "batch_sizes": [spec.batch_size for spec in all_specs],
             "sequence_capacity": LOGICAL_SEQUENCE_CAPACITY,
-            "update_lengths": list(DEFAULT_UPDATE_LENGTHS),
-            "correctness_request_index_dtypes": ["int32", "int64"],
+            "update_lengths": list(DEFAULT_UPDATE_LENGTHS if stage == STAGE01 else STAGE2_UPDATE_LENGTHS),
+            "correctness_request_index_dtypes": ["int32", "int64"] if stage == STAGE01 else ["int64"],
             "timed_request_index_dtype": "int64",
             "warmup_count": args.warmup,
             "isolated_samples": args.isolated_samples,
@@ -697,6 +784,7 @@ def run(args: argparse.Namespace) -> int:
             "sustained_calls_per_block": args.sustained_calls,
             "seed": args.seed,
             "physical_backing_policy": "guarded rows and aligned metadata backing; see storage_plan",
+            "stage2_batch_policy": "C/2, C, 2C; excludes C-1 and C+1" if stage == STAGE2 else None,
         },
         "source": provenance,
         "environment": metadata,
@@ -705,7 +793,7 @@ def run(args: argparse.Namespace) -> int:
             "upstream_build_target_example": provenance["source_build_target_example"],
             "benchmark_script": str(Path(__file__).resolve()),
         },
-        "case_definitions": [asdict(spec) | {"case_id": spec.case_id, "storage": asdict(storage_plan(spec))} for spec in all_specs],
+        "case_definitions": manifest_case_definitions(all_specs, static_cores),
         "result_files": {"jsonl": "results.jsonl", "csv": "results.csv", "raw_samples": "raw-samples/"},
     }
     try:
@@ -722,11 +810,16 @@ def run(args: argparse.Namespace) -> int:
             return 2
         manifest["environment"] = context.metadata
         manifest["assign_active_cores"] = context.active_assign_cores
+        all_specs = selected_case_specs(stage, args.seed, context.active_assign_cores)
+        manifest["benchmark_parameters"]["batch_sizes"] = [spec.batch_size for spec in all_specs]
+        manifest["case_definitions"] = manifest_case_definitions(all_specs, context.active_assign_cores)
         manifest["status"] = "running"
         write_manifest(manifest_path, manifest)
         correctness: dict[tuple[int, int, str], dict[str, Any]] = {}
         for spec in all_specs:
-            base = base_record(spec, provenance, context.metadata, args.warmup, "failed", None)
+            base = base_record(
+                spec, provenance, context.metadata, args.warmup, "failed", None, context.active_assign_cores
+            )
             base["record_type"] = "correctness"
             base["timing_mode"] = "correctness"
             try:
@@ -748,7 +841,7 @@ def run(args: argparse.Namespace) -> int:
             writer.record(base)
             correctness[(spec.batch_size, spec.update_length, spec.request_index_dtype)] = base
 
-        for spec in case_specs(args.seed, ("int64",)):
+        for spec in (candidate for candidate in all_specs if candidate.request_index_dtype == "int64"):
             status = correctness[(spec.batch_size, spec.update_length, spec.request_index_dtype)]
             if status["correctness_status"] != "passed":
                 continue
@@ -760,7 +853,9 @@ def run(args: argparse.Namespace) -> int:
                     isolated_fixture, args.warmup, args.isolated_samples
                 )
                 isolated_median = statistics.median(isolated)
-                isolated_record = base_record(spec, provenance, context.metadata, args.warmup, "passed", None)
+                isolated_record = base_record(
+                    spec, provenance, context.metadata, args.warmup, "passed", None, context.active_assign_cores
+                )
                 isolated_record.update(
                     {
                         "timing_mode": "isolated_synchronized_api_latency",
@@ -790,7 +885,9 @@ def run(args: argparse.Namespace) -> int:
                 mean_call_us = [block["mean_call_us"] for block in blocks]
                 calls_per_second = [block["calls_per_second"] for block in blocks]
                 sustained_rate = statistics.median(calls_per_second)
-                sustained_record = base_record(spec, provenance, context.metadata, args.warmup, "passed", None)
+                sustained_record = base_record(
+                    spec, provenance, context.metadata, args.warmup, "passed", None, context.active_assign_cores
+                )
                 sustained_record.update(
                     {
                         "timing_mode": "sustained_synchronized_blocks",
@@ -814,7 +911,9 @@ def run(args: argparse.Namespace) -> int:
                 )
                 writer.record(sustained_record)
             except Exception as error:
-                failure = base_record(spec, provenance, context.metadata, args.warmup, "passed", str(error))
+                failure = base_record(
+                    spec, provenance, context.metadata, args.warmup, "passed", str(error), context.active_assign_cores
+                )
                 failure.update(
                     {
                         "record_type": "timing_failure",
