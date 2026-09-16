@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+/upstream/
+/build/
+/dist/
+# Raw measurements and profiler traces stay local. Reviewed summaries live in results/.
+/runs/
+.DS_Store

@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/sgl-project/sgl-kernel-npu.git",
+  "commit": "cdcb9d8b719a6100dadc3544c8cd33ff53bf668a",
+  "checkout": "upstream/sgl-kernel-npu",
+  "operators": ["torch.ops.npu.cache_loc_assign", "torch.ops.npu.cache_loc_update"],
+  "source_paths": {
+    "host": "csrc/cache_location_assign/op_host/cache_loc_assign.cpp",
+    "tiling": "csrc/cache_location_assign/op_host/tiling/cache_loc_assign.h",
+    "kernel": "csrc/cache_location_assign/op_kernel/cache_loc_assign_kernel.cpp",
+    "bindings": "csrc/pytorch_extensions.cpp",
+    "assign_test": "tests/python/sgl_kernel_npu/test_cache_assign.py",
+    "retrieve_test": "tests/python/sgl_kernel_npu/test_cache_update.py",
+    "build": "build.sh"
+  },
+  "git_blob_ids": {
+    "host": "5fbecbed85a2e9b8d0f711e1b791eba32e8d24d4",
+    "tiling": "2f8e9bd771c125adbf4f4550db6dad032f38a38d",
+    "kernel": "109f60435d9af4b973cb69b319431e9e73de804a",
+    "assign_test": "a6987da084523047042b34ee76f6a1ba59a5e9c9"
+  },
+  "observed_max_step": 16,
+  "observations_are": "Static source observations; not hardware validation",
+  "build_target_example": ["bash", "build.sh", "-a", "kernels", "Ascend910_9382"]
+}
