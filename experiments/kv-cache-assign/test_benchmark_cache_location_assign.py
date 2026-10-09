@@ -5,6 +5,8 @@ import json
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -17,6 +19,58 @@ SPEC.loader.exec_module(benchmark)
 
 
 class BenchmarkPlanTests(unittest.TestCase):
+    def arguments(self, output: Path, **overrides):
+        values = dict(output_dir=output, seed=1, warmup=20, isolated_samples=200,
+                      sustained_blocks=5, sustained_calls=200, assign_active_cores=32,
+                      dry_run=False, stage=benchmark.STAGE01)
+        return Namespace(**(values | overrides))
+
+    def test_unvalidated_core_geometry_is_rejected(self):
+        for cores in (2, 3, 12, 20, 80):
+            with self.subTest(cores=cores), self.assertRaises(ValueError):
+                benchmark.stage2_case_specs(1, cores)
+
+    def test_failed_correctness_never_reaches_timing_and_fails_run(self):
+        class Context:
+            active_assign_cores = 32
+            metadata = {}
+
+        class RejectedFixture:
+            def __init__(self, context, spec):
+                pass
+
+            def verify(self):
+                return {"status": "failed", "failure_reason": "injected guard corruption"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            with patch.object(benchmark, "NpuContext", return_value=Context()), \
+                 patch.object(benchmark, "AssignFixture", RejectedFixture), \
+                 patch.object(benchmark, "benchmark_isolated_api_latency") as isolated, \
+                 patch.object(benchmark, "benchmark_sustained_blocks") as sustained:
+                self.assertEqual(benchmark.run(self.arguments(output)), 1)
+                isolated.assert_not_called()
+                sustained.assert_not_called()
+            manifest = json.loads((output / "run-manifest.json").read_text())
+            self.assertEqual(manifest["status"], "completed-with-failures")
+            self.assertEqual(manifest["failure_count"], 24)
+            records = [json.loads(line) for line in (output / "results.jsonl").read_text().splitlines()]
+            self.assertEqual(len(records), 24)
+            self.assertTrue(all(record["record_type"] == "correctness" for record in records))
+            self.assertTrue(all((output / record["raw_samples_path"]).is_file() for record in records))
+
+    def test_dry_run_does_not_import_device_packages(self):
+        import builtins
+        original_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name.split(".")[0] in ("torch", "torch_npu", "sgl_kernel_npu"):
+                raise AssertionError(f"dry run imported {name}")
+            return original_import(name, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory, patch("builtins.__import__", guarded_import):
+            self.assertEqual(benchmark.run(self.arguments(Path(directory) / "run", dry_run=True)), 0)
+
     def test_stage_matrix_is_exactly_stage_zero_and_one(self) -> None:
         specs = benchmark.case_specs(7, ("int32", "int64"))
         self.assertEqual(len(specs), 24)

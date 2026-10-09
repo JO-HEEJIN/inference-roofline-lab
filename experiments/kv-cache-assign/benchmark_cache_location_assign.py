@@ -26,6 +26,7 @@ import sys
 import time
 import traceback
 import uuid
+from importlib import metadata as package_metadata
 from shutil import which
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -100,6 +101,8 @@ class CaseSpec:
             raise ValueError("batch size must be positive")
         if self.stage == STAGE01 and self.batch_size not in DEFAULT_BATCH_SIZES:
             raise ValueError(f"Stage 0/1 batch must be one of {DEFAULT_BATCH_SIZES}")
+        if self.stage == STAGE2 and (self.batch_size % 8 or self.batch_size > 128):
+            raise ValueError("Stage 2 currently admits only multiples of eight up to 128")
         if self.sequence_capacity != LOGICAL_SEQUENCE_CAPACITY:
             raise ValueError("Stage 1 permits only sequence capacity 2048")
         allowed_updates = DEFAULT_UPDATE_LENGTHS if self.stage == STAGE01 else STAGE2_UPDATE_LENGTHS
@@ -235,8 +238,12 @@ def read_upstream_metadata(workspace: Path) -> dict[str, Any]:
     manifest_path = workspace / "experiments" / "kv-cache-assign" / "upstream.json"
     source = json.loads(manifest_path.read_text())
     source_root = workspace / source["checkout"]
+    actual_commit = git_output(("git", "rev-parse", "HEAD"), source_root)
     return {
         "source_commit": source["commit"],
+        "source_checkout_commit": actual_commit,
+        "source_checkout_matches_pin": actual_commit == source["commit"],
+        "binary_source_linkage": "unverified: retain build log and loaded-library hash together",
         "source_repository": source["repository"],
         "source_build_target_example": source.get("build_target_example"),
         "source_dirty_tree_status": git_dirty_status(source_root),
@@ -283,18 +290,11 @@ def static_metadata(workspace: Path) -> dict[str, Any]:
     if npu_smi:
         metadata["npu_smi_path"] = npu_smi
         metadata["npu_smi_version"] = git_output((npu_smi, "--version"), workspace)
-    try:
-        import torch  # type: ignore
-
-        metadata["torch_version"] = torch.__version__
-    except Exception as error:  # pragma: no cover - environment dependent
-        metadata["torch_import_error"] = repr(error)
-    try:
-        import torch_npu  # type: ignore
-
-        metadata["torch_npu_version"] = getattr(torch_npu, "__version__", "unknown")
-    except Exception as error:
-        metadata["torch_npu_import_error"] = repr(error)
+    for package, field in (("torch", "torch_version"), ("torch-npu", "torch_npu_version")):
+        try:
+            metadata[field] = package_metadata.version(package)
+        except package_metadata.PackageNotFoundError:
+            metadata[field] = None
     return metadata
 
 
@@ -436,7 +436,9 @@ class AssignFixture:
         cache_values = torch.full(
             (self.plan.cache_logical_count + self.plan.cache_guard_count,), -3_000_000, dtype=torch.int32
         )
-        cache_values[: spec.total_useful_entries] = torch.arange(
+        # Negative useful values are disjoint from every positive logical pool
+        # value: even one missing store must be observable by the checker.
+        cache_values[: spec.total_useful_entries] = -torch.arange(
             100_000, 100_000 + spec.total_useful_entries, dtype=torch.int32
         )
         cache_values[self.plan.cache_logical_count :] = -4_000_000 - torch.arange(
@@ -529,6 +531,7 @@ class AssignFixture:
         )
         checks = {
             "exact_changed_cells": bool(exact_changed),
+            "exact_changed_cell_mask": bool(torch.equal(actual_pool != self.initial_pool_cpu, changed_mask)),
             "untouched_cells_preserved": bool(untouched),
             "token_guard_preserved": bool(token_guards),
             "packed_cache_padding_preserved": bool(cache_padding),
@@ -657,7 +660,10 @@ def stage2_batch_sizes(active_assign_cores: int) -> tuple[int, ...]:
     """
     if active_assign_cores < 2:
         raise ValueError("Stage 2 needs at least two active assign cores")
-    return tuple(sorted({max(1, active_assign_cores // 2), active_assign_cores, 2 * active_assign_cores}))
+    batches = tuple(sorted({active_assign_cores // 2, active_assign_cores, 2 * active_assign_cores}))
+    if any(batch <= 0 or batch % 8 or batch > 128 for batch in batches):
+        raise ValueError("Stage 2 C/2, C, 2C must all be multiples of eight and at most 128; access validation required")
+    return batches
 
 
 def stage2_case_specs(seed: int, active_assign_cores: int) -> list[CaseSpec]:
@@ -755,10 +761,10 @@ def run(args: argparse.Namespace) -> int:
     provenance = read_upstream_metadata(workspace)
     metadata = static_metadata(workspace)
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
-    writer = ResultWriter(args.output_dir, run_id)
     manifest_path = args.output_dir / "run-manifest.json"
     static_cores = args.assign_active_cores if stage == STAGE2 else None
     all_specs = selected_case_specs(stage, args.seed, static_cores) if (stage == STAGE01 or static_cores) else []
+    writer = ResultWriter(args.output_dir, run_id)
     scope = (
         "Stage 0 correctness plus Stage 1 int64 assign baseline only"
         if stage == STAGE01
@@ -773,7 +779,7 @@ def run(args: argparse.Namespace) -> int:
         "benchmark_parameters": {
             "operation": "assign",
             "experiment_stage": stage,
-            "batch_sizes": [spec.batch_size for spec in all_specs],
+            "batch_sizes": sorted({spec.batch_size for spec in all_specs}),
             "sequence_capacity": LOGICAL_SEQUENCE_CAPACITY,
             "update_lengths": list(DEFAULT_UPDATE_LENGTHS if stage == STAGE01 else STAGE2_UPDATE_LENGTHS),
             "correctness_request_index_dtypes": ["int32", "int64"] if stage == STAGE01 else ["int64"],
@@ -783,6 +789,7 @@ def run(args: argparse.Namespace) -> int:
             "sustained_blocks": args.sustained_blocks,
             "sustained_calls_per_block": args.sustained_calls,
             "seed": args.seed,
+            "requested_assign_core_count": args.assign_active_cores,
             "physical_backing_policy": "guarded rows and aligned metadata backing; see storage_plan",
             "stage2_batch_policy": "C/2, C, 2C; excludes C-1 and C+1" if stage == STAGE2 else None,
         },
@@ -811,11 +818,12 @@ def run(args: argparse.Namespace) -> int:
         manifest["environment"] = context.metadata
         manifest["assign_active_cores"] = context.active_assign_cores
         all_specs = selected_case_specs(stage, args.seed, context.active_assign_cores)
-        manifest["benchmark_parameters"]["batch_sizes"] = [spec.batch_size for spec in all_specs]
+        manifest["benchmark_parameters"]["batch_sizes"] = sorted({spec.batch_size for spec in all_specs})
         manifest["case_definitions"] = manifest_case_definitions(all_specs, context.active_assign_cores)
         manifest["status"] = "running"
         write_manifest(manifest_path, manifest)
         correctness: dict[tuple[int, int, str], dict[str, Any]] = {}
+        failure_count = 0
         for spec in all_specs:
             base = base_record(
                 spec, provenance, context.metadata, args.warmup, "failed", None, context.active_assign_cores
@@ -839,6 +847,8 @@ def run(args: argparse.Namespace) -> int:
                 )
                 base["raw_samples_path"] = raw_path
             writer.record(base)
+            if base["correctness_status"] != "passed":
+                failure_count += 1
             correctness[(spec.batch_size, spec.update_length, spec.request_index_dtype)] = base
 
         for spec in (candidate for candidate in all_specs if candidate.request_index_dtype == "int64"):
@@ -911,6 +921,7 @@ def run(args: argparse.Namespace) -> int:
                 )
                 writer.record(sustained_record)
             except Exception as error:
+                failure_count += 1
                 failure = base_record(
                     spec, provenance, context.metadata, args.warmup, "passed", str(error), context.active_assign_cores
                 )
@@ -928,8 +939,13 @@ def run(args: argparse.Namespace) -> int:
                     }
                 )
                 writer.record(failure)
-        manifest["status"] = "completed"
-        return 0
+        manifest["failure_count"] = failure_count
+        manifest["status"] = "completed-with-failures" if failure_count else "completed"
+        return 1 if failure_count else 0
+    except BaseException as error:
+        manifest["status"] = "aborted"
+        manifest["failure_reason"] = f"{type(error).__name__}: {error}"
+        raise
     finally:
         write_manifest(manifest_path, manifest)
         writer.close()
