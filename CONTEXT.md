@@ -150,14 +150,28 @@ built and installed for the pinned revision. The current development host is
 Darwin arm64 and has no `npu-smi`, `torch_npu`, or `sgl_kernel_npu`.
 
 Acceptance conditions before taking measurements are in
-[`docs/ascend-runbook.md`](docs/ascend-runbook.md), the comparison of confirmed
-access paths is in
+[`docs/ascend-runbook.md`](docs/ascend-runbook.md), the comparison of access
+paths examined so far is in
 [`docs/ascend-access-options.md`](docs/ascend-access-options.md), and the
 provider acceptance table is in
 [`docs/templates/ascend-offer.md`](docs/templates/ascend-offer.md). Every
 provider entry is UNVERIFIED, and no payment, server creation, or support
 ticket has ever been made. Account identifiers, phone numbers, card details,
 and SSH private keys are not recorded in this repository.
+
+### No access path is currently open
+
+Both paths examined so far are ruled out, so there is no provider to resume
+with. CANNLab's phone verification does not accept South Korea, and the Huawei
+Cloud path was abandoned as too expensive and unusable by this user
+(see ADR-008 and ADR-010). G1 is blocked on payment and identity verification
+rather than on anything technical, so repeating a signup of the same kind is
+not expected to change the outcome.
+
+Two alternatives are recorded but not approved: asking a third party that
+already has a device to run the harness, or freezing `kv-cache-assign` without
+evidence and retargeting the experiment at reachable hardware. Until one is
+chosen, the harness stays ready and unmeasured.
 
 ## Documentation rules
 

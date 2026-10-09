@@ -1,5 +1,12 @@
 # Ascend access decision — 2026-09-17
 
+> **Superseded on 2026-10-09. Do not act on the recommendation below.**
+> Both candidates are now ruled out: CANNLab's phone verification does not
+> accept South Korea, and the Huawei Cloud path was abandoned as too expensive
+> and unusable by this user. See ADR-008 and ADR-010 in [`../ADR.md`](../ADR.md)
+> and the current status in [`../CONTEXT.md`](../CONTEXT.md). The findings below
+> are retained as the evidence that was gathered at the time.
+
 User preference: lowest total cost. No account created, payment made, or NPU allocated.
 
 First choice: CANNLab's free allowance, subject to account eligibility and capacity.
