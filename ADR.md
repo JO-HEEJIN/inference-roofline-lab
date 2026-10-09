@@ -80,6 +80,35 @@
 - 검증: Stage 2 matrix는 `C=32` dry run에서 batch 16/32/64와 길이 1/16으로 생성되고 C±1을 포함하지 않는 단위 테스트를 추가한다. 실제 device의 `C`, correctness, latency, profiler per-core data는 Ascend 하드웨어에서만 기록한다.
 - 결과: Mac에서 static validation만 가능하다. `torch_npu`가 없으므로 performance 또는 core-transition 결과는 생성하지 않았다.
 
+## ADR-008 — 실행 성공과 측정 증거의 경계 보강
+
+- 날짜: 2026-09-17
+- 상태: 로컬 검증 완료; 실제 Ascend 실행 대기
+- 관찰: 실패한 correctness case를 timing에서 제외하더라도 전체 run은 성공으로 종료했다. dry run의 환경 수집은 torch_npu import를 시도했다. Stage 2의 C/2 생성은 일부 core 수에서 미검증 nonmultiple-of-eight batch를 만들었다.
+- 결정: 실패가 있으면 exit 1 및 completed-with-failures를 기록한다. 예외 중단은 aborted로 기록한다. 정적 환경 수집은 설치된 distribution metadata만 읽는다. Stage 2는 모든 생성 batch가 8의 배수이고 128 이하일 때만 허용한다. manifest에 실제 checkout HEAD와 pin 일치 여부, 미검증 binary/source 연결 상태를 명시한다.
+- 이유: 파일 생성이나 guard 보존을 하드웨어 검증 성공으로 오인하지 않도록 한다. 이미 준비한 Stage 2는 실행 가능한 선택지일 뿐, Stage 0/1 실측을 대체하거나 후속 실험의 타당성을 입증하지 않는다.
+- 검증: 실패 주입으로 timing 함수가 호출되지 않고 24개 실패 artifact와 실패 종료가 남는지 확인했다. device module import 차단 상태에서 dry run을 검증했다. 지원하지 않는 core geometry 거부를 포함해 unittest 11개를 통과했다. 합성 테스트 기록은 임시 디렉터리에서만 생성했다.
+- 후속: docs/ascend-runbook.md에 독립 process 3회 실행, build/binary 출처, 메모리 검사와 최종 사람 검토에 필요한 자료를 기록했다. NPU 결과는 없으며 kernel/host는 변경하지 않았다.
+
 ## 기록 형식
 
+### 2026-09-17 최소 비용 Ascend 접근 결정
+
+사용자의 최저가 요청에 따라 CANNLab의 무료 초기 100 카드시간을 우선 후보로 선택했다. 공식 매뉴얼에 A2 단일 카드와 개발 도구 접근이 명시되어 있다. 현재 GitCode 진입 화면은 로그인 단계이며 계정 자격·실명인증·가용 재고·고정 upstream과의 호환성은 미확인이다. 광고 가격만 싼 모델 API 상품은 custom kernel 빌드 환경으로 채택하지 않았다. 비교 근거는 docs/ascend-access-options.md에 기록했다. 결제나 서버 생성은 하지 않았다.
+
+### 2026-09-17 후속 검증과 설치 대상 대기
+
+실제 fixture를 CPU의 독립적인 scalar reference로 검사하고, no-op·잘못된 행 쓰기·untouched cell·pool guard·cache padding/guard·metadata 손상을 주입했다. 별도 fixture 사이의 backing 독립성과 reset도 검증했다. 모든 useful 값을 음수로 생성해 양수 logical pool 값과 겹치지 않게 하고, 실제 변경 mask 자체도 대조한다. 전체 테스트 15개가 통과했다. CPU 테스트는 checker 검증이며 NPU kernel 실행 증거가 아니다.
+
+사용자가 Ascend 서버 설치를 요청했다. 현재 호스트는 Darwin arm64이며 npu-smi는 없다. 설치 대상 SSH 주소 또는 임대 지역/예산이 필요하다. 서버 정보가 확인되기 전에는 다른 호스트에 접속하거나 유료 자원을 생성하지 않는다. 설치 후에도 고정된 upstream revision에 맞는 장치·driver·CANN·torch_npu 조합을 확인해야 한다.
+
 각 후속 ADR에는 날짜·상태, 관찰 또는 질문, 결정, 대안과 이유, 검증 방법, 실제 결과와 남은 제약을 적는다. 성능 가설에는 반증 조건을 포함한다. 추측을 측정 결과로 기록하지 않는다.
+
+### 2026-09-18 Ascend 공급자 선택 보류: 결제 가능성과 실제 견적 우선
+
+- 상태: 조사 완료 범위 기록; 공급자·결제·장치 확보 미확정.
+- 관찰: 사용자는 GitCode 전화 인증에서 한국을 선택할 수 없었고, Huawei Cloud International 가입은 진행했으나 신용카드가 없다. 가입 가능 여부는 NPU 구매 가능 여부나 최저가의 증거가 아니다. 앞선 CANNLab 우선 추천은 현재 사용자에게 실행 가능한 경로로 확인되지 않았다.
+- 결정: Huawei를 장기 사용처 또는 최저가로 확정하지 않는다. 신용카드 없는 계정 활성화, 호환 Ascend 단일 카드의 실제 가용성, custom kernel 빌드/실행 권한, 저장소를 포함한 견적 확인 전 충전·월정액 계약을 권하지 않는다. 로컬 준비 후 짧은 종량제 실측을 우선한다.
+- 근거: 국제 사이트 공식 FAQ는 Visa/Mastercard debit card에 서비스 티켓 승인이 필요하다고 명시한다. 선불 직접 고객의 은행 송금 충전은 문서화되어 있으나 이 계정의 자격과 활성화 가능성은 확인하지 못했다. public pool은 인스턴스 정지 시 compute 과금이 끝나지만 dedicated pool은 pool 삭제까지 과금되며 저장소는 별도다. 실제 NPU 시간당 단가는 확보하지 못했다.
+- 출처: https://support.huaweicloud.com/intl/en-us/faq-billing/creditcard_topic_100010.html ; https://support.huaweicloud.com/intl/en-us/usermanual-billing/en-us_topic_0031465732.html ; https://support.huaweicloud.com/intl/en-us/price-modelarts/price-modelarts-0005.html ; https://support.huaweicloud.com/intl/en-us/price-modelarts/price-modelarts-0010.html
+- 결과: 신규 결제·유료 자원 생성·지원 티켓 발송 없음. 실제 Ascend benchmark 결과 없음.
