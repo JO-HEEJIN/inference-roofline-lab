@@ -112,3 +112,15 @@
 - 근거: 국제 사이트 공식 FAQ는 Visa/Mastercard debit card에 서비스 티켓 승인이 필요하다고 명시한다. 선불 직접 고객의 은행 송금 충전은 문서화되어 있으나 이 계정의 자격과 활성화 가능성은 확인하지 못했다. public pool은 인스턴스 정지 시 compute 과금이 끝나지만 dedicated pool은 pool 삭제까지 과금되며 저장소는 별도다. 실제 NPU 시간당 단가는 확보하지 못했다.
 - 출처: https://support.huaweicloud.com/intl/en-us/faq-billing/creditcard_topic_100010.html ; https://support.huaweicloud.com/intl/en-us/usermanual-billing/en-us_topic_0031465732.html ; https://support.huaweicloud.com/intl/en-us/price-modelarts/price-modelarts-0005.html ; https://support.huaweicloud.com/intl/en-us/price-modelarts/price-modelarts-0010.html
 - 결과: 신규 결제·유료 자원 생성·지원 티켓 발송 없음. 실제 Ascend benchmark 결과 없음.
+
+## ADR-009 — 문서를 수명으로 분류: STATE는 CONTEXT.md, 계획은 이슈 트래커
+
+- 날짜: 2026-10-09
+- 상태: 채택
+- 배경: 저장소에 `docs/NEXT_AGENT.md`, `experiments/kv-cache-assign/investigation-plan.md`, `docs/performance-investigation-plan.md`가 있었다. 모두 미래 시제 문서이며, 마지막 변경 이후 약 3주간 실행이 진행되지 않아 내용이 현재 상태와 어긋날 위험이 커졌다. 저장소에 있는 파일은 읽는 사람과 agent에게 현재 사실로 읽힌다.
+- 결정: 문서를 종류가 아니라 수명으로 분류한다. 현재 동작·구조·용어는 `CONTEXT.md`에 현재 시제로 두고 동작 변경과 같은 커밋에서 갱신한다. 결정의 역사는 `ADR.md`에 과거 시제로 남긴다. 계획과 실행 지시서는 이슈 트래커로 옮기고 저장소에서 제거한다. 조사 계획은 [#1](https://github.com/JO-HEEJIN/inference-roofline-lab/issues/1), G0~G4 실행 지시서는 [#2](https://github.com/JO-HEEJIN/inference-roofline-lab/issues/2)로 옮겼다. `docs/performance-investigation-plan.md`는 3줄 포인터 stub이어서 #1에 흡수했다.
+- 대안: (1) 세 문서를 그대로 둔다. (2) `ADR.md`를 `docs/adr/NNNN-*.md`로 분할한다.
+- 이유: 미래 시제 문서는 구현이 끝나는 순간 history가 되지만 저장소는 그것을 숨기지 못한다. 닫힌 이슈는 검색은 되고 보이지는 않으므로 spec의 수명에 맞는다. ADR 분할은 과거 시제라 지금 오해를 만들지 않고 비용만 드므로 하지 않았다. 사용자가 두 대안을 모두 명시적으로 거절했다.
+- 불변성 처리: ADR-003의 `investigation-plan.md` 링크는 끊어졌지만 채택된 ADR을 수정하지 않는 규칙에 따라 원문을 보존했다. 그 시점에 해당 경로의 문서가 존재했다는 기술은 여전히 사실이며, 현재 위치는 이 ADR과 `CONTEXT.md`가 가리킨다.
+- 검증: 삭제한 세 경로를 참조하는 곳을 전부 찾아 `experiments/kv-cache-assign/README.md`와 `README.md`의 링크를 이슈로 바꿨다. 이슈 본문이 잘리지 않고 끝까지 들어갔는지 확인했다. `scripts/validate-local.sh`로 테스트 15개를 재실행했다.
+- 결과: 코드 동작 변경 없음. NPU 측정 결과는 여전히 없으며 G1에서 대기 중이다.

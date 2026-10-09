@@ -6,9 +6,12 @@ The first experiment investigates SGLang's Ascend NPU `cache_location_assign` pa
 
 ## Layout
 
+- [`CONTEXT.md`](CONTEXT.md): how the harness behaves right now, the measurement vocabulary, and what has not been measured.
 - [`ADR.md`](ADR.md): decisions, evidence, and changed assumptions.
-- [`docs/`](docs/): experiment-method pointers.
-- [`experiments/kv-cache-assign/`](experiments/kv-cache-assign/): pinned-upstream provenance, plan, guarded fixture harness, tests, and result schema.
+- [`docs/`](docs/): Ascend execution runbook and access evidence.
+- [`experiments/kv-cache-assign/`](experiments/kv-cache-assign/): pinned-upstream provenance, guarded fixture harness, tests, and result schema.
+
+Plans and execution instructions live in the [issue tracker](https://github.com/JO-HEEJIN/inference-roofline-lab/issues), not in this repository.
 
 ## First benchmark
 
